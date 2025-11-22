@@ -1,0 +1,9 @@
+python-telegram-bot
+yt-dlp
+flask
+gunicorn
+requests
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
