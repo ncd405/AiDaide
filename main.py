@@ -1,116 +1,121 @@
 import os
 import logging
+import requests
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ConversationHandler
 from flask import Flask
 from threading import Thread
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, vfx
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 # --- CẤU HÌNH ---
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHO_ANH = 1 # Trạng thái chờ gửi ảnh
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+
+# --- KẾT NỐI AI (GEMINI) ---
+import google.generativeai as genai
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    chat_session = model.start_chat(history=[])
 
 # --- WEB SERVER ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "🎬 BOT EDIT VIDEO IS LIVE!"
+def home(): return "💎 BOT V23 (COBALT ENGINE) ONLINE!"
 def run_web(): app.run(host='0.0.0.0', port=10000)
 def keep_alive(): Thread(target=run_web).start()
 
-# --- HÀM DỰNG PHIM (MOVIE MAKER) ---
-def make_beat_video(user_id, photo_paths):
-    output_path = f"video_{user_id}_{int(time.time())}.mp4"
+# --- HÀM TẢI MEDIA (DÙNG API COBALT - KHÔNG LO CHẶN IP) ---
+def tai_media_cobalt(url, is_audio=False):
+    print(f"⚡ Gửi yêu cầu Cobalt: {url}")
+    api_url = "https://api.cobalt.tools/api/json"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    data = {
+        "url": url,
+        "vCodec": "h264",
+        "vQuality": "max",
+        "aFormat": "mp3",
+        "filenamePattern": "basic",
+        "isAudioOnly": is_audio
+    }
+    
     try:
-        # Cấu hình mẫu: 2 Ảnh, mỗi ảnh 3 giây, nhạc nền
-        clips = []
-        for p in photo_paths:
-            # Tạo clip từ ảnh, dài 3s, resize chuẩn TikTok
-            clip = ImageClip(p).set_duration(3).resize(height=960)
-            # Hiệu ứng Zoom nhẹ (Ken Burns) - Giả lập bằng code
-            # (MoviePy cơ bản, để render nhanh trên Free Tier)
-            clips.append(clip)
+        response = requests.post(api_url, json=data, headers=headers).json()
         
-        # Ghép lại
-        final_video = concatenate_videoclips(clips, method="compose")
-        
-        # Thêm nhạc (Cắt đúng độ dài video)
-        if os.path.exists("beat.mp3"):
-            audio = AudioFileClip("beat.mp3").subclip(0, final_video.duration)
-            final_video = final_video.set_audio(audio)
-            
-        # Xuất file (Preset ultrafast để render nhanh)
-        final_video.write_videofile(output_path, fps=24, codec="libx264", preset="ultrafast", audio_codec="aac")
-        return output_path
+        if 'url' in response:
+            return response['url']
+        elif 'picker' in response: # Nếu có nhiều video
+            return response['picker'][0]['url']
+        else:
+            print(f"Lỗi Cobalt: {response}")
+            return None
     except Exception as e:
-        print(f"Lỗi Render: {e}")
+        print(f"Lỗi kết nối API: {e}")
         return None
 
-# --- XỬ LÝ LỆNH ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🎬 Tạo Video Beat (Cần 2 Ảnh)", callback_data='mau_1')]]
-    await update.message.reply_text(
-        "👑 **XƯỞNG PHIM AI ĐẠI ĐẾ**\nChọn mẫu muốn làm:", 
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
-    )
-    return ConversationHandler.END
+# --- XỬ LÝ TIN NHẮN ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if not text: return
+
+    if "http" in text:
+        context.user_data['current_link'] = text
+        kb = [[InlineKeyboardButton("🎬 Video HD", callback_data='dl_video'), InlineKeyboardButton("🎵 Nhạc MP3", callback_data='dl_audio')]]
+        await update.message.reply_text(f"🔗 Link nhận diện!\n👉 Chọn định dạng:", reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        if GOOGLE_API_KEY:
+            try:
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                response = chat_session.send_message(text)
+                await update.message.reply_text(response.text, parse_mode=ParseMode.MARKDOWN)
+            except: await update.message.reply_text("Lag rồi đại ca ơi!")
 
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == 'mau_1':
-        await query.edit_message_text("⚡ **Đã chọn Mẫu Beat!**\n👉 Hãy gửi cho anh **2 Tấm Ảnh** (Gửi từng tấm một).")
-        context.user_data['photos'] = []
-        return CHO_ANH
-
-async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo_file = await update.message.photo[-1].get_file()
-    file_path = f"photo_{update.message.message_id}.jpg"
-    await photo_file.download_to_drive(file_path)
+    choice = query.data
+    link = context.user_data.get('current_link')
     
-    context.user_data['photos'].append(file_path)
-    count = len(context.user_data['photos'])
+    if not link: return
     
-    if count < 2:
-        await update.message.reply_text(f"📸 Đã nhận {count}/2 ảnh. Gửi tiếp đi em!")
-        return CHO_ANH
-    else:
-        msg = await update.message.reply_text("⏳ **Đủ ảnh rồi! Đang dựng phim... (Đợi 10s)**")
-        
-        # Render Video
-        video_path = make_beat_video(update.effective_user.id, context.user_data['photos'])
-        
-        if video_path and os.path.exists(video_path):
-            await update.message.reply_video(video=open(video_path, 'rb'), caption="💎 **Video của em đây!**")
-            os.remove(video_path)
-        else:
-            await update.message.reply_text("❌ Render lỗi rồi đại ca ơi!")
+    is_audio = (choice == 'dl_audio')
+    type_str = "Nhạc" if is_audio else "Video"
+    
+    await query.edit_message_text(f"⚡ Đang nhờ Server Cobalt tải {type_str}...")
+    
+    # Lấy link tải trực tiếp từ API
+    direct_url = tai_media_cobalt(link, is_audio)
+    
+    if direct_url:
+        try:
+            await query.edit_message_text(f"🚀 Đang bắn {type_str} qua...")
             
-        # Dọn dẹp ảnh
-        for p in context.user_data['photos']:
-            if os.path.exists(p): os.remove(p)
-        context.user_data['photos'] = []
+            if is_audio:
+                await context.bot.send_audio(chat_id=query.message.chat_id, audio=direct_url, caption="🎵 Nhạc về!")
+            else:
+                await context.bot.send_video(chat_id=query.message.chat_id, video=direct_url, caption="💎 Video sạch (No Watermark)!")
         
-        await msg.delete()
-        return ConversationHandler.END
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Đã hủy.")
-    return ConversationHandler.END
+        except Exception as e:
+            # Nếu file quá nặng không gửi được -> Gửi link tải
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"⚠️ File quá nặng (>50MB)!\n🚀 **Bấm vào đây tải ngay:**\n{direct_url}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+    else:
+        await query.edit_message_text("❌ Lỗi: Link này Cobalt chưa hỗ trợ hoặc Server đang bận!")
 
 if __name__ == '__main__':
     keep_alive()
     if TELEGRAM_TOKEN:
+        print(">>> BOT V23 (COBALT) STARTED...")
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        
-        conv_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(button_click)],
-            states={
-                CHO_ANH: [MessageHandler(filters.PHOTO, receive_photo)]
-            },
-            fallbacks=[CommandHandler('cancel', cancel), CommandHandler('start', start)]
-        )
-        
-        app.add_handler(CommandHandler('start', start))
-        app.add_handler(conv_handler)
+        app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+        app.add_handler(CallbackQueryHandler(button_click))
         app.run_polling()
