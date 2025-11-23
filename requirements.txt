@@ -1,0 +1,5 @@
+python-telegram-bot
+moviepy
+flask
+gunicorn
+requests
