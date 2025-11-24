@@ -1,5 +1,6 @@
 python-telegram-bot
-moviepy
+google-generativeai
 flask
 gunicorn
 requests
+pillow

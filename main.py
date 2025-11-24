@@ -1,121 +1,80 @@
 import os
 import logging
-import requests
-import time
 from flask import Flask
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+import google.generativeai as genai
+import PIL.Image
 
 # --- CẤU HÌNH ---
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+# Link bán đồ phong thủy (Affiliate của bạn)
+LINK_PHONG_THUY = "https://shope.ee/..." 
 
-# --- KẾT NỐI AI (GEMINI) ---
-import google.generativeai as genai
+# --- KẾT NỐI NÃO BỘ VISION ---
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     model = genai.GenerativeModel("gemini-1.5-flash")
-    chat_session = model.start_chat(history=[])
 
 # --- WEB SERVER ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "💎 BOT V23 (COBALT ENGINE) ONLINE!"
+def home(): return "🔮 THẦY BÓI AI ONLINE!"
 def run_web(): app.run(host='0.0.0.0', port=10000)
 def keep_alive(): Thread(target=run_web).start()
 
-# --- HÀM TẢI MEDIA (DÙNG API COBALT - KHÔNG LO CHẶN IP) ---
-def tai_media_cobalt(url, is_audio=False):
-    print(f"⚡ Gửi yêu cầu Cobalt: {url}")
-    api_url = "https://api.cobalt.tools/api/json"
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    data = {
-        "url": url,
-        "vCodec": "h264",
-        "vQuality": "max",
-        "aFormat": "mp3",
-        "filenamePattern": "basic",
-        "isAudioOnly": is_audio
-    }
+# --- NHÂN CÁCH THẦY BÓI ---
+PROMPT_BOI = """
+Hãy đóng vai một "Thầy Bói AI" đanh đá, hài hước và cực kỳ phũ phàng (Toxic nhưng vui).
+Nhiệm vụ: Nhìn vào bức ảnh người dùng gửi và "phán" về tính cách, tương lai hoặc tình duyên của họ dựa trên chi tiết trong ảnh.
+Quy tắc:
+1. Ngôn ngữ: Tiếng Việt, dùng từ lóng giới trẻ (Gen Z).
+2. Độ dài: Khoảng 3-4 câu.
+3. Kết thúc: Luôn khuyên họ nên tu tâm dưỡng tính hoặc mua đồ giải hạn.
+"""
+
+# --- XỬ LÝ ẢNH (XEM TƯỚNG) ---
+async def xem_tuong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo: return
+
+    msg = await update.message.reply_text("🔮 **Thầy đang soi... Đừng có rung!**", parse_mode='Markdown')
     
     try:
-        response = requests.post(api_url, json=data, headers=headers).json()
+        # Tải ảnh về
+        photo_file = await update.message.photo[-1].get_file()
+        file_path = "temp.jpg"
+        await photo_file.download_to_drive(file_path)
         
-        if 'url' in response:
-            return response['url']
-        elif 'picker' in response: # Nếu có nhiều video
-            return response['picker'][0]['url']
-        else:
-            print(f"Lỗi Cobalt: {response}")
-            return None
+        # Gửi sang Google Gemini Vision
+        img = PIL.Image.open(file_path)
+        response = model.generate_content([PROMPT_BOI, img])
+        loi_phan = response.text
+        
+        # Gửi kết quả kèm nút bán hàng
+        kb = [[InlineKeyboardButton("📿 Mua Bùa Giải Hạn (Giảm 50%)", url=LINK_PHONG_THUY)]]
+        
+        await msg.edit_text(
+            f"⚡ **THẦY PHÁN:**\n\n{loi_phan}\n\n👇 **Muốn đổi vận thì bấm dưới:**",
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode='Markdown'
+        )
+        
+        os.remove(file_path)
     except Exception as e:
-        print(f"Lỗi kết nối API: {e}")
-        return None
+        await msg.edit_text(f"❌ Thầy bị che mắt rồi (Lỗi: {e})")
 
-# --- XỬ LÝ TIN NHẮN ---
+# --- XỬ LÝ TEXT ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if not text: return
-
-    if "http" in text:
-        context.user_data['current_link'] = text
-        kb = [[InlineKeyboardButton("🎬 Video HD", callback_data='dl_video'), InlineKeyboardButton("🎵 Nhạc MP3", callback_data='dl_audio')]]
-        await update.message.reply_text(f"🔗 Link nhận diện!\n👉 Chọn định dạng:", reply_markup=InlineKeyboardMarkup(kb))
-    else:
-        if GOOGLE_API_KEY:
-            try:
-                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-                response = chat_session.send_message(text)
-                await update.message.reply_text(response.text, parse_mode=ParseMode.MARKDOWN)
-            except: await update.message.reply_text("Lag rồi đại ca ơi!")
-
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    link = context.user_data.get('current_link')
-    
-    if not link: return
-    
-    is_audio = (choice == 'dl_audio')
-    type_str = "Nhạc" if is_audio else "Video"
-    
-    await query.edit_message_text(f"⚡ Đang nhờ Server Cobalt tải {type_str}...")
-    
-    # Lấy link tải trực tiếp từ API
-    direct_url = tai_media_cobalt(link, is_audio)
-    
-    if direct_url:
-        try:
-            await query.edit_message_text(f"🚀 Đang bắn {type_str} qua...")
-            
-            if is_audio:
-                await context.bot.send_audio(chat_id=query.message.chat_id, audio=direct_url, caption="🎵 Nhạc về!")
-            else:
-                await context.bot.send_video(chat_id=query.message.chat_id, video=direct_url, caption="💎 Video sạch (No Watermark)!")
-        
-        except Exception as e:
-            # Nếu file quá nặng không gửi được -> Gửi link tải
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=f"⚠️ File quá nặng (>50MB)!\n🚀 **Bấm vào đây tải ngay:**\n{direct_url}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-    else:
-        await query.edit_message_text("❌ Lỗi: Link này Cobalt chưa hỗ trợ hoặc Server đang bận!")
+    await update.message.reply_text("📸 **Gửi ảnh Selfie hoặc Bàn Tay vào đây để Thầy xem tướng cho!**")
 
 if __name__ == '__main__':
     keep_alive()
     if TELEGRAM_TOKEN:
-        print(">>> BOT V23 (COBALT) STARTED...")
+        print(">>> THAY BOI STARTED...")
         app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(MessageHandler(filters.PHOTO, xem_tuong))
         app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-        app.add_handler(CallbackQueryHandler(button_click))
         app.run_polling()
